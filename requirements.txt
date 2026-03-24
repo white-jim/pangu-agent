@@ -1,0 +1,24 @@
+# 核心依赖
+gradio>=4.0.0
+numpy>=1.21.0
+python-dotenv>=1.0.0
+
+# Transformers和模型相关
+transformers>=4.30.0
+torch>=2.0.0
+sentence-transformers>=2.2.0
+
+# 向量数据库
+faiss-cpu>=1.7.0
+
+# 外部API支持
+openai>=1.0.0
+
+# 数据处理
+pydantic>=2.0.0
+
+# 日志和工具
+colorlog>=6.0.0
+
+# 昇腾NPU支持（可选，需要昇腾环境）
+# torch-npu
