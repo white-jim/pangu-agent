@@ -1,0 +1,64 @@
+classDiagram
+    class DecisionCenter {
+        -IntentRecognizer intentRecognizer
+        -ModuleRegistry moduleRegistry
+        -ContextManager contextManager
+        +process(input, sessionId) DecisionResult
+        +registerModule(module) bool
+    }
+
+    class IntentRecognizer {
+        -LLMClient modelClient
+        +recognize(input) IntentResult
+    }
+
+    class ModuleRegistry {
+        -Dict modules
+        +register(module) bool
+        +getModule(name) BaseModule
+    }
+
+    class ContextManager {
+        -Dict contexts
+        +getContext(sessionId) List
+        +addTurn(sessionId, ...) void
+    }
+
+    class BaseModule {
+        <<abstract>>
+        +name: string
+        +execute(query, context) ModuleResult
+    }
+
+    class SemanticModule {
+        -RAGEngine ragEngine
+    }
+    class NavigationModule {
+        -NavigationAPI api
+    }
+    class VisionModule {
+        -VisionAPI api
+    }
+
+    class IntentResult {
+        +intentType: IntentType
+        +actionType: ActionType
+        +confidence: float
+        +needsToolchain: bool
+        +toolchainPlan: List
+    }
+
+    class DecisionResult {
+        +success: bool
+        +response: string
+        +toolchainResults: List
+    }
+
+    DecisionCenter *-- IntentRecognizer
+    DecisionCenter *-- ModuleRegistry
+    DecisionCenter *-- ContextManager
+    BaseModule <|-- SemanticModule
+    BaseModule <|-- NavigationModule
+    BaseModule <|-- VisionModule
+    ModuleRegistry o-- BaseModule
+    DecisionResult *-- IntentResult

@@ -1,0 +1,27 @@
+sequenceDiagram
+    participant U as 用户
+    participant W as Gradio界面
+    participant A as PanguAgent
+    participant D as 决策中枢
+    participant I as 意图识别器
+    participant M as 语义模块
+    participant LLM as 大模型
+
+    U->>W: 输入问题
+    W->>A: process(query)
+    A->>D: process(input)
+    
+    D->>I: recognize(input)
+    I->>LLM: 解析意图
+    LLM-->>I: IntentResult
+    I-->>D: 意图+工具链计划
+    
+    D->>M: execute(query, context)
+    M->>M: RAG检索知识
+    M->>LLM: generate(prompt)
+    LLM-->>M: 生成回答
+    M-->>D: ModuleResult
+    
+    D-->>A: DecisionResult
+    A-->>W: 返回结果
+    W-->>U: 展示回答+执行过程

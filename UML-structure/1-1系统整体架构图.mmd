@@ -1,0 +1,33 @@
+flowchart TB
+    subgraph L1["🖥️ 用户交互层"]
+        direction LR
+        G[Gradio界面] --> IN[问题输入] --> OUT[结果展示]
+    end
+
+    subgraph L2["🧠 智能决策中枢层"]
+        direction LR
+        IR[意图识别器] --> DE[决策引擎] --> CM[上下文管理]
+    end
+
+    subgraph L3["⚙️ 功能模块层"]
+        direction LR
+        M1["语义交互<br/>RAG问答"]
+        M2["导航导览<br/>路径规划"]
+        M3["视觉交互<br/>人脸识别"]
+    end
+
+    subgraph L4["🔧 硬件适配层"]
+        direction LR
+        PM["OpenPangu<br/>昇腾NPU"] 
+        API["外部API<br/>SiliconFlow"]
+        HW["外设接口<br/>摄像头/导航"]
+    end
+
+    L1 -->|用户请求| L2
+    L2 -->|调度执行| L3
+    L3 -->|模型推理| L4
+    L4 -.->|结果返回| L1
+
+    DE -.->|工具链调度| M1
+    DE -.->|工具链调度| M2
+    DE -.->|工具链调度| M3
