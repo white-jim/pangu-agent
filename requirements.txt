@@ -1,24 +1,20 @@
-# 核心依赖
+# ===== 核心依赖（API调用模式必须安装）=====
 gradio>=4.0.0
 numpy>=1.21.0
 python-dotenv>=1.0.0
-
-# Transformers和模型相关
-transformers>=4.30.0
-torch>=2.0.0
-sentence-transformers>=2.2.0
-
-# 向量数据库
-faiss-cpu>=1.7.0
-
-# 外部API支持
 openai>=1.0.0
-
-# 数据处理
 pydantic>=2.0.0
-
-# 日志和工具
 colorlog>=6.0.0
 
-# 昇腾NPU支持（可选，需要昇腾环境）
+# ===== RAG增强依赖（可选，推荐安装，CPU可用）=====
+# 不安装时系统自动降级为简单hash向量检索
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.0
+
+# ===== 本地模型依赖（仅使用本地OpenPangu模型时需要安装）=====
+# 仅在有本地模型路径时才需要，GPU不好的设备无需安装
+# transformers>=4.30.0
+# torch>=2.0.0
+
+# ===== 昇腾NPU支持（可选，需要昇腾环境）=====
 # torch-npu

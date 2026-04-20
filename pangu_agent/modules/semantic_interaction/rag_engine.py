@@ -40,7 +40,7 @@ class RAGEngine:
     DEFAULT_PROMPT_TEMPLATE = """参考资料：
 {context}
 
-用户问题：{question}
+{history_section}用户问题：{question}
 
 请根据以上参考资料回答用户问题："""
 
@@ -138,62 +138,79 @@ class RAGEngine:
         top_k = top_k or self.top_k
         return self.vector_store.search(query, top_k)
     
-    def build_prompt(self, query: str, retrieved_docs: List[SearchResult]) -> str:
+    def build_prompt(
+        self,
+        query: str,
+        retrieved_docs: List[SearchResult],
+        history: Optional[List[Dict]] = None,
+        intermediate_results: Optional[Dict] = None
+    ) -> str:
         """
-        构建提示词
-        
-        Args:
-            query: 用户查询
-            retrieved_docs: 检索到的文档
-            
-        Returns:
-            str: 构建好的提示词
+        构建提示词，整合 RAG 检索结果、历史对话和工具链中间结果。
         """
         context_parts = []
         for i, result in enumerate(retrieved_docs, 1):
             context_parts.append(f"[文档{i}] {result.document.content}")
-        
         context = "\n\n".join(context_parts) if context_parts else "无相关参考资料"
-        
-        prompt = self.prompt_template.format(context=context, question=query)
-        
+
+        # 历史对话段落
+        history_section = ""
+        if history:
+            history_lines = []
+            for msg in history:
+                role = "用户" if msg.get("role") == "user" else "助手"
+                history_lines.append(f"{role}：{msg.get('content', '')}")
+            if history_lines:
+                history_section = "历史对话：\n" + "\n".join(history_lines) + "\n\n"
+
+        # 工具链中间结果段落（拼在 context 后面）
+        if intermediate_results:
+            tool_parts = []
+            for key, val in intermediate_results.items():
+                if val.get("success") and val.get("result"):
+                    result_text = str(val["result"])[:300]
+                    tool_parts.append(f"[{val.get('module', key)}执行结果] {result_text}")
+            if tool_parts:
+                context = context + "\n\n工具执行结果：\n" + "\n".join(tool_parts)
+
+        prompt = self.prompt_template.format(
+            context=context,
+            history_section=history_section,
+            question=query
+        )
         return prompt
     
     def generate(
         self,
         query: str,
         retrieved_docs: List[SearchResult],
+        history: Optional[List[Dict]] = None,
+        intermediate_results: Optional[Dict] = None,
         **kwargs
     ) -> str:
-        """
-        生成回答
-        
-        Args:
-            query: 用户查询
-            retrieved_docs: 检索到的文档
-            
-        Returns:
-            str: 生成的回答
-        """
+        """生成回答，支持历史对话和工具链中间结果。"""
         if self.model_client is None:
             return self._generate_fallback(query, retrieved_docs)
-        
-        prompt = self.build_prompt(query, retrieved_docs)
-        
+
+        prompt = self.build_prompt(query, retrieved_docs, history, intermediate_results)
+
         try:
             if hasattr(self.model_client, 'generate'):
                 response = self.model_client.generate(prompt, **kwargs)
             elif hasattr(self.model_client, 'chat'):
                 messages = [
                     {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt}
                 ]
+                # 将历史对话注入 messages（chat 接口直接传多轮更自然）
+                if history:
+                    messages.extend(history)
+                messages.append({"role": "user", "content": prompt})
                 response = self.model_client.chat(messages, **kwargs)
             else:
                 return self._generate_fallback(query, retrieved_docs)
-            
+
             return response
-            
+
         except Exception as e:
             logger.error(f"模型生成失败: {e}")
             return self._generate_fallback(query, retrieved_docs)
@@ -214,26 +231,22 @@ class RAGEngine:
         self,
         query: str,
         top_k: Optional[int] = None,
+        history: Optional[List[Dict]] = None,
+        intermediate_results: Optional[Dict] = None,
         **kwargs
     ) -> RAGResult:
         """
-        RAG查询
-        
-        Args:
-            query: 用户查询
-            top_k: 检索数量
-            
-        Returns:
-            RAGResult: RAG结果
+        RAG 查询，支持历史对话上下文和工具链中间结果。
         """
         top_k = top_k or self.top_k
-        
+
         retrieved_docs = self.retrieve(query, top_k)
-        
-        answer = self.generate(query, retrieved_docs, **kwargs)
-        
-        prompt = self.build_prompt(query, retrieved_docs)
-        
+
+        answer = self.generate(query, retrieved_docs, history=history,
+                               intermediate_results=intermediate_results, **kwargs)
+
+        prompt = self.build_prompt(query, retrieved_docs, history, intermediate_results)
+
         return RAGResult(
             query=query,
             retrieved_docs=retrieved_docs,

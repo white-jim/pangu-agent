@@ -49,7 +49,9 @@ class ToolchainExecutionResult:
     result: Any
     message: str
     duration_ms: float
-    
+    retries: int = 0
+    skipped: bool = False
+
     def to_dict(self) -> Dict:
         return {
             "step_number": self.step_number,
@@ -58,7 +60,9 @@ class ToolchainExecutionResult:
             "success": self.success,
             "result": self.result,
             "message": self.message,
-            "duration_ms": self.duration_ms
+            "duration_ms": self.duration_ms,
+            "retries": self.retries,
+            "skipped": self.skipped
         }
 
 
@@ -438,14 +442,17 @@ class DecisionCenter:
         
         # 确定最终执行状态和元数据
         if is_toolchain_execution:
-            # 工具链执行：根据所有步骤结果确定最终状态
             all_success = all(r.success for r in toolchain_results)
+            completed_count = len([r for r in toolchain_results if r.success])
+            total_retries = sum(r.retries for r in toolchain_results)
             final_metadata = {
                 "needs_toolchain": True,
                 "toolchain_plan": [s.to_dict() for s in intent_result.toolchain_plan],
                 "toolchain_step_count": len(intent_result.toolchain_plan),
-                "toolchain_completed_count": len([r for r in toolchain_results if r.success]),
-                "toolchain_all_success": all_success
+                "toolchain_completed_count": completed_count,
+                "toolchain_all_success": all_success,
+                "toolchain_partial": not all_success and completed_count > 0,
+                "toolchain_total_retries": total_retries
             }
             final_success = all_success
             final_module_name = "toolchain"
@@ -478,6 +485,15 @@ class DecisionCenter:
         
         return "semantic_interaction"
     
+    # 工具链步骤失败时的备用模块映射：当某模块不可用时尝试降级到备用模块
+    FALLBACK_MODULE_MAPPING = {
+        "navigation": "semantic_interaction",
+        "vision": "semantic_interaction",
+    }
+
+    # 工具链步骤最大重试次数
+    TOOLCHAIN_MAX_RETRIES = 2
+
     def _execute_toolchain(
         self,
         user_input: str,
@@ -488,22 +504,13 @@ class DecisionCenter:
         steps: List[DecisionStep]
     ) -> tuple:
         """
-        执行工具链
-        
-        Args:
-            user_input: 用户输入
-            toolchain_plan: 工具链计划
-            context: 对话上下文
-            session_id: 会话ID
-            intent_result: 意图识别结果
-            steps: 决策步骤列表
-            
+        执行工具链，支持步骤重试、备用模块降级和部分成功处理。
+
         Returns:
             tuple: (最终响应, 工具链执行结果列表)
         """
         toolchain_results: List[ToolchainExecutionResult] = []
-        
-        # 创建工具链执行步骤
+
         toolchain_exec_step = DecisionStep(
             step_name="toolchain_execution",
             step_description=f"开始执行工具链（共{len(toolchain_plan)}步）",
@@ -511,56 +518,22 @@ class DecisionCenter:
             sub_steps=[]
         )
         steps.append(toolchain_exec_step)
-        
-        # 用于存储中间结果，供后续步骤使用
+
         intermediate_results = {}
-        
+
         for i, tc_step in enumerate(toolchain_plan, 1):
-            step_start_time = time.time()
             module_name = tc_step.module
             action = tc_step.action
-            
-            # 创建子步骤记录
+
             tc_sub_step = DecisionStep(
                 step_name=f"toolchain_exec_{i}",
                 step_description=f"步骤{i}: 执行 {module_name}.{action}",
                 status="running"
             )
             toolchain_exec_step.sub_steps.append(tc_sub_step)
-            
+
             logger.info(f"执行工具链步骤 {i}/{len(toolchain_plan)}: {module_name}.{action}")
-            
-            # 获取模块
-            module = self.module_registry.get_module(module_name)
-            
-            if module is None:
-                duration = (time.time() - step_start_time) * 1000
-                error_msg = f"模块 {module_name} 未找到"
-                
-                tc_sub_step.status = "failed"
-                tc_sub_step.success = False
-                tc_sub_step.duration_ms = duration
-                tc_sub_step.result = {"error": error_msg}
-                
-                toolchain_results.append(ToolchainExecutionResult(
-                    step_number=i,
-                    module_name=module_name,
-                    action=action,
-                    success=False,
-                    result=None,
-                    message=error_msg,
-                    duration_ms=duration
-                ))
-                
-                # 如果某一步失败，终止工具链
-                toolchain_exec_step.status = "failed"
-                toolchain_exec_step.success = False
-                toolchain_exec_step.step_description = f"工具链执行失败：步骤{i}失败"
-                
-                error_response = f"工具链执行失败：步骤{i}（{module_name}模块）无法执行。\n错误：{error_msg}"
-                return error_response, toolchain_results
-            
-            # 准备执行上下文
+
             exec_context = {
                 "history": context,
                 "session_id": session_id,
@@ -572,125 +545,207 @@ class DecisionCenter:
                 "intermediate_results": intermediate_results,
                 "original_query": user_input
             }
-            
-            try:
-                # 执行模块
-                module_result = module.execute(
-                    query=user_input,
-                    context=exec_context
-                )
-                duration = (time.time() - step_start_time) * 1000
-                
-                # 更新子步骤状态
-                tc_sub_step.status = "completed"
-                tc_sub_step.success = module_result.success
-                tc_sub_step.duration_ms = duration
-                tc_sub_step.result = module_result.to_dict()
-                tc_sub_step.step_description = f"步骤{i}: {module_name}.{action} - {'成功' if module_result.success else '失败'}"
-                
-                # 保存结果
-                result_data = module_result.data if module_result.success else module_result.message
-                toolchain_results.append(ToolchainExecutionResult(
-                    step_number=i,
-                    module_name=module_name,
-                    action=action,
-                    success=module_result.success,
-                    result=result_data,
-                    message=module_result.message,
-                    duration_ms=duration
-                ))
-                
-                # 保存中间结果供后续步骤使用
+
+            tc_result = self._execute_toolchain_step(
+                step_number=i,
+                module_name=module_name,
+                action=action,
+                query=user_input,
+                exec_context=exec_context,
+                tc_sub_step=tc_sub_step
+            )
+            toolchain_results.append(tc_result)
+
+            if tc_result.success:
                 intermediate_results[f"step_{i}"] = {
-                    "module": module_name,
+                    "module": tc_result.module_name,
                     "action": action,
-                    "result": result_data,
-                    "success": module_result.success
+                    "result": tc_result.result,
+                    "success": True
                 }
-                
-                # 如果某一步失败，终止工具链
-                if not module_result.success:
-                    toolchain_exec_step.status = "failed"
-                    toolchain_exec_step.success = False
-                    toolchain_exec_step.step_description = f"工具链执行失败：步骤{i}执行失败"
-                    
-                    error_response = f"工具链执行失败：步骤{i}（{module_name}模块）执行失败。\n原因：{module_result.message}"
-                    return error_response, toolchain_results
-                
-            except Exception as e:
-                duration = (time.time() - step_start_time) * 1000
-                error_msg = str(e)
-                
-                tc_sub_step.status = "failed"
-                tc_sub_step.success = False
-                tc_sub_step.duration_ms = duration
-                tc_sub_step.result = {"error": error_msg}
-                
-                toolchain_results.append(ToolchainExecutionResult(
-                    step_number=i,
-                    module_name=module_name,
-                    action=action,
-                    success=False,
-                    result=None,
-                    message=f"执行异常: {error_msg}",
-                    duration_ms=duration
-                ))
-                
-                toolchain_exec_step.status = "failed"
+            else:
+                # 步骤失败：记录已完成部分，生成部分成功响应后终止
+                toolchain_exec_step.status = "partial"
                 toolchain_exec_step.success = False
-                toolchain_exec_step.step_description = f"工具链执行失败：步骤{i}发生异常"
-                
-                error_response = f"工具链执行失败：步骤{i}（{module_name}模块）发生异常。\n错误：{error_msg}"
-                return error_response, toolchain_results
-        
-        # 工具链执行完成
+                toolchain_exec_step.step_description = (
+                    f"工具链部分完成：步骤{i}失败，已完成 {i-1}/{len(toolchain_plan)} 步"
+                )
+                partial_response = self._generate_toolchain_response(
+                    toolchain_results, user_input, partial=True, failed_step=i
+                )
+                return partial_response, toolchain_results
+
         toolchain_exec_step.status = "completed"
         toolchain_exec_step.success = True
         toolchain_exec_step.step_description = f"工具链执行完成：共{len(toolchain_plan)}步全部成功"
-        
-        # 生成综合响应
+
         final_response = self._generate_toolchain_response(toolchain_results, user_input)
-        
         return final_response, toolchain_results
+
+    def _execute_toolchain_step(
+        self,
+        step_number: int,
+        module_name: str,
+        action: str,
+        query: str,
+        exec_context: Dict,
+        tc_sub_step: DecisionStep,
+        retries: int = 0
+    ) -> ToolchainExecutionResult:
+        """
+        执行单个工具链步骤，内置重试和备用模块降级逻辑。
+        重试策略：最多重试 TOOLCHAIN_MAX_RETRIES 次；全部失败后尝试备用模块。
+        """
+        step_start_time = time.time()
+        last_error = ""
+
+        # --- 重试循环 ---
+        for attempt in range(self.TOOLCHAIN_MAX_RETRIES + 1):
+            module = self.module_registry.get_module(module_name)
+
+            if module is None:
+                last_error = f"模块 {module_name} 未找到"
+                logger.warning(f"步骤{step_number} 尝试{attempt+1}: {last_error}")
+                break  # 模块不存在，直接跳出重试，尝试备用
+
+            try:
+                module_result = module.execute(query=query, context=exec_context)
+                duration = (time.time() - step_start_time) * 1000
+
+                if module_result.success:
+                    tc_sub_step.status = "completed"
+                    tc_sub_step.success = True
+                    tc_sub_step.duration_ms = duration
+                    tc_sub_step.result = module_result.to_dict()
+                    tc_sub_step.step_description = (
+                        f"步骤{step_number}: {module_name}.{action} - 成功"
+                        + (f"（第{attempt+1}次尝试）" if attempt > 0 else "")
+                    )
+                    return ToolchainExecutionResult(
+                        step_number=step_number,
+                        module_name=module_name,
+                        action=action,
+                        success=True,
+                        result=module_result.data,
+                        message=module_result.message,
+                        duration_ms=duration,
+                        retries=attempt
+                    )
+                else:
+                    last_error = module_result.message
+                    logger.warning(f"步骤{step_number} 尝试{attempt+1} 执行失败: {last_error}")
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"步骤{step_number} 尝试{attempt+1} 异常: {last_error}")
+
+            if attempt < self.TOOLCHAIN_MAX_RETRIES:
+                logger.info(f"步骤{step_number} 等待重试...")
+                time.sleep(0.1 * (attempt + 1))  # 简单退避
+
+        # --- 备用模块降级 ---
+        fallback_name = self.FALLBACK_MODULE_MAPPING.get(module_name)
+        if fallback_name and fallback_name != module_name:
+            fallback_module = self.module_registry.get_module(fallback_name)
+            if fallback_module:
+                logger.info(f"步骤{step_number}: 主模块 {module_name} 失败，降级到备用模块 {fallback_name}")
+                try:
+                    fallback_context = dict(exec_context)
+                    fallback_context["action"] = "qa_general"
+                    fallback_context["fallback_from"] = module_name
+                    module_result = fallback_module.execute(query=query, context=fallback_context)
+                    duration = (time.time() - step_start_time) * 1000
+
+                    if module_result.success:
+                        tc_sub_step.status = "completed"
+                        tc_sub_step.success = True
+                        tc_sub_step.duration_ms = duration
+                        tc_sub_step.result = module_result.to_dict()
+                        tc_sub_step.step_description = (
+                            f"步骤{step_number}: {module_name}.{action} - 已降级到 {fallback_name}"
+                        )
+                        return ToolchainExecutionResult(
+                            step_number=step_number,
+                            module_name=fallback_name,
+                            action="qa_general",
+                            success=True,
+                            result=module_result.data,
+                            message=f"[降级] 原模块 {module_name} 失败，由 {fallback_name} 代替处理",
+                            duration_ms=duration,
+                            retries=self.TOOLCHAIN_MAX_RETRIES
+                        )
+                except Exception as e:
+                    logger.warning(f"步骤{step_number} 备用模块 {fallback_name} 也失败: {e}")
+
+        # --- 全部失败 ---
+        duration = (time.time() - step_start_time) * 1000
+        tc_sub_step.status = "failed"
+        tc_sub_step.success = False
+        tc_sub_step.duration_ms = duration
+        tc_sub_step.result = {"error": last_error}
+        tc_sub_step.step_description = (
+            f"步骤{step_number}: {module_name}.{action} - 失败（已重试{self.TOOLCHAIN_MAX_RETRIES}次）"
+        )
+        return ToolchainExecutionResult(
+            step_number=step_number,
+            module_name=module_name,
+            action=action,
+            success=False,
+            result=None,
+            message=last_error,
+            duration_ms=duration,
+            retries=self.TOOLCHAIN_MAX_RETRIES
+        )
     
     def _generate_toolchain_response(
         self,
         toolchain_results: List[ToolchainExecutionResult],
-        original_query: str
+        original_query: str,
+        partial: bool = False,
+        failed_step: int = 0
     ) -> str:
-        """
-        生成工具链执行的综合响应
-        
-        Args:
-            toolchain_results: 工具链执行结果列表
-            original_query: 原始用户查询
-            
-        Returns:
-            str: 综合响应文本
-        """
-        response_parts = ["🔗 工具链执行完成\n"]
-        response_parts.append(f"共执行 {len(toolchain_results)} 个步骤：\n")
-        
-        for result in toolchain_results:
-            status_icon = "✅" if result.success else "❌"
-            response_parts.append(f"\n{status_icon} 步骤{result.step_number}: {result.module_name} 模块")
-            response_parts.append(f"   动作: {result.action}")
-            if isinstance(result.result, str):
-                # 提取结果的关键信息（简化显示）
-                result_summary = result.result.split('\n')[0] if result.result else "完成"
-                response_parts.append(f"   结果: {result_summary}")
-        
-        response_parts.append("\n" + "="*40)
-        
-        # 最后一步的结果作为主要输出
-        if toolchain_results:
-            final_result = toolchain_results[-1]
-            response_parts.append(f"\n📋 最终结果：")
-            if isinstance(final_result.result, str):
-                response_parts.append(final_result.result)
-            else:
-                response_parts.append(str(final_result.result))
-        
+        """生成工具链执行的综合响应，支持部分成功场景。"""
+        if partial:
+            completed = [r for r in toolchain_results if r.success]
+            response_parts = [f"⚠️ 工具链部分完成（步骤{failed_step}失败）\n"]
+            if completed:
+                response_parts.append(f"已完成 {len(completed)} 个步骤：\n")
+                for result in completed:
+                    response_parts.append(f"✅ 步骤{result.step_number}: {result.module_name} 模块")
+                    if isinstance(result.result, str):
+                        summary = result.result.split('\n')[0] if result.result else "完成"
+                        response_parts.append(f"   结果: {summary}")
+            failed = toolchain_results[-1]
+            response_parts.append(f"\n❌ 步骤{failed.step_number}（{failed.module_name}）失败")
+            response_parts.append(f"   原因：{failed.message}")
+            if failed.retries > 0:
+                response_parts.append(f"   已重试 {failed.retries} 次")
+        else:
+            response_parts = ["🔗 工具链执行完成\n"]
+            response_parts.append(f"共执行 {len(toolchain_results)} 个步骤：\n")
+            for result in toolchain_results:
+                status_icon = "✅" if result.success else "❌"
+                extra = ""
+                if result.retries > 0:
+                    extra = f"（重试{result.retries}次）"
+                if result.skipped:
+                    extra = "（已跳过）"
+                response_parts.append(f"\n{status_icon} 步骤{result.step_number}: {result.module_name} 模块{extra}")
+                response_parts.append(f"   动作: {result.action}")
+                if isinstance(result.result, str):
+                    result_summary = result.result.split('\n')[0] if result.result else "完成"
+                    response_parts.append(f"   结果: {result_summary}")
+
+            response_parts.append("\n" + "=" * 40)
+
+            if toolchain_results:
+                final_result = toolchain_results[-1]
+                response_parts.append("\n📋 最终结果：")
+                if isinstance(final_result.result, str):
+                    response_parts.append(final_result.result)
+                else:
+                    response_parts.append(str(final_result.result))
+
         return "\n".join(response_parts)
     
     def get_status(self) -> Dict:

@@ -150,26 +150,25 @@ class SemanticInteractionModule(BaseModule):
         return self._rag_engine.add_knowledge(documents)
     
     def execute(self, query: str, context: Dict, **kwargs) -> ModuleResult:
-        """
-        执行问答
-        
-        Args:
-            query: 用户查询
-            context: 上下文信息
-            
-        Returns:
-            ModuleResult: 执行结果
-        """
+        """执行问答，将历史对话和工具链中间结果传入 RAG 引擎。"""
         if not self._initialized:
             return ModuleResult(
                 success=False,
                 data=None,
                 message="模块未初始化"
             )
-        
+
         try:
-            rag_result = self._rag_engine.query(query, top_k=self.top_k)
-            
+            history = context.get("history") or []
+            intermediate_results = context.get("intermediate_results") or {}
+
+            rag_result = self._rag_engine.query(
+                query,
+                top_k=self.top_k,
+                history=history if history else None,
+                intermediate_results=intermediate_results if intermediate_results else None
+            )
+
             retrieved_info = [
                 {
                     "content": doc.document.content,
@@ -178,7 +177,7 @@ class SemanticInteractionModule(BaseModule):
                 }
                 for doc in rag_result.retrieved_docs
             ]
-            
+
             return ModuleResult(
                 success=True,
                 data=rag_result.generated_answer,
@@ -186,10 +185,12 @@ class SemanticInteractionModule(BaseModule):
                 metadata={
                     "retrieved_docs": retrieved_info,
                     "doc_count": len(rag_result.retrieved_docs),
-                    "prompt_used": rag_result.prompt_used
+                    "prompt_used": rag_result.prompt_used,
+                    "history_turns": len(history),
+                    "has_intermediate_results": bool(intermediate_results)
                 }
             )
-            
+
         except Exception as e:
             logger.error(f"问答执行失败: {e}")
             return ModuleResult(
